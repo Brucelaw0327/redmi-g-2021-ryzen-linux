@@ -1,0 +1,2 @@
+size=134MB copy=2.61 scale=2.70 add=3.20 triad=8.35 GB/s
+chk=36892.5

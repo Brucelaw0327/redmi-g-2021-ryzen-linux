@@ -1,0 +1,124 @@
+To: platform-driver-x86@vger.kernel.org
+Cc: Mingyou Chen <qby140326@gmail.com>
+Subject: [PATCH] platform/x86: bitland-mifs-wmi: accept undefined AC type, unbreaks performance profiles
+
+Hi,
+
+I'm running Linux on a Xiaomi Redmi G 2021 (DMI: TIMI / A7S, board TM2037),
+which binds to bitland-mifs-wmi. Two problems show up on this machine,
+both in the platform_profile path.
+
+Problem 1: performance profiles are rejected because of the AC type check
+--------------------------------------------------------------------------
+
+bitland_check_performance_capability() requires
+
+    output.data[0] == WMI_SYSTEM_AC_CIRCULARHOLE   /* == 2 */
+
+but this EC returns 0 for WMI_FN_SYSTEM_AC_TYPE, which is not a member of
+enum bitland_system_ac_mode:
+
+    enum bitland_system_ac_mode {
+            WMI_SYSTEM_AC_TYPEC          = 1,
+            WMI_SYSTEM_AC_CIRCULARHOLE   = 2,
+    };
+
+Instrumented build output on AC power (barrel jack, 230 W adapter):
+
+    bitland_mifs_wmi: CAP: system_supplied=1
+    bitland_mifs_wmi: CAP: AC type raw=0 (typec=1 circular=2)
+    bitland_mifs_wmi: CAP: rejected, expected 2
+
+So both PLATFORM_PROFILE_BALANCED_PERFORMANCE and PLATFORM_PROFILE_PERFORMANCE
+return -EOPNOTSUPP, even though platform_profile_probe() advertises all four
+choices:
+
+    $ cat /sys/firmware/acpi/platform_profile_choices
+    low-power balanced balanced-performance performance
+
+    $ echo performance > /sys/firmware/acpi/platform_profile
+    -bash: echo: write error: Operation not supported
+
+The machine is definitely on the bundled barrel-jack PSU, not USB-C
+(ADP1/online=1, BAT0 full). Fn+K on the EC does select performance mode,
+so the hardware supports it — only the WMI set path is blocked.
+
+Problem 2: WMI_PP_BALANCED (0) is not honoured by the firmware
+--------------------------------------------------------------
+
+PLATFORM_PROFILE_BALANCED maps to WMI_PP_BALANCED (0). The WMI call returns
+success and the driver reports no error, but the EC does not switch to that
+mode and platform_profile_get() then reports full speed:
+
+    bitland_mifs_wmi: SET: option=3 -> wmi mode=0
+    bitland_mifs_wmi: SET: ret=0
+    bitland_mifs_wmi: GET: raw mode=3       <-- full speed, not balanced
+
+For comparison, mode 2 behaves correctly:
+
+    bitland_mifs_wmi: SET: option=0 -> wmi mode=2
+    bitland_mifs_wmi: SET: ret=0
+    bitland_mifs_wmi: GET: raw mode=2
+
+The firmware on this model only implements three modes (quiet=2,
+performance=1, full-speed=3), which matches the three entries in its BIOS
+setup ("System Performance Mode": Turbo / Balance / Silence). Mode 0 is
+accepted but silently ignored. This makes the ACPI "balanced" choice a
+phantom: writing it looks successful and actually lands on full speed.
+
+Note this is the mirror image of the report from September 2026 on a
+USB-C model, where "performance" was advertised but rejected:
+https://lists.openwall.net/linux-kernel/2026/09/01/788
+
+Proposed fix
+------------
+
+Only reject when the EC explicitly reports Type-C. An undefined value should
+not disable the profile; let the firmware decide.
+
+--- a/drivers/platform/x86/bitland-mifs-wmi.c
++++ b/drivers/platform/x86/bitland-mifs-wmi.c
+@@ -237,8 +237,15 @@ static int bitland_check_performance_capability(struct bitland_mifs_wmi_data *da
+ 	if (ret)
+ 		return ret;
+ 
+-	if (output.data[0] != WMI_SYSTEM_AC_CIRCULARHOLE)
++	/*
++	 * Some models (e.g. Redmi G 2021 / TM2037) return 0 here, which is not
++	 * part of enum bitland_system_ac_mode. Only reject when the EC
++	 * explicitly reports Type-C power, otherwise assume the barrel jack
++	 * and let the firmware decide.
++	 */
++	if (output.data[0] == WMI_SYSTEM_AC_TYPEC)
+ 		return -EOPNOTSUPP;
+ 
+ 	return 0;
+ }
+
+With that change all three real modes work on this machine:
+
+    write                 read back              firmware setup byte
+    low-power             low-power              2 (Silence)
+    balanced-performance  balanced-performance   1 (Balance)
+    performance           performance            0 (Turbo)
+
+(the firmware setup byte is UEFI variable `Setup`, GUID
+a04a27f4-df00-4d42-b552-39511302113d, offset 0x230)
+
+I have not changed the mode value mapping: quiet=2 / performance=1 /
+full_speed=3 are correct for this EC, and balanced (0) simply has no
+firmware implementation. Userspace (power-profiles-daemon, KDE PowerDevil)
+should map its "balanced" to balanced-performance on such machines, which
+is what the three-mode enum above already implies. If you prefer, an
+alternative is to drop PLATFORM_PROFILE_BALANCED from choices when the
+firmware does not implement mode 0, so the phantom choice is not advertised
+in the first place.
+
+I can send a formal patch with a proper Signed-off-by and the DMI quirk if
+you want the AC-type change to be model-specific instead of unconditional.
+
+Tested on: Redmi G 2021 (Ryzen 7 5800H + RTX 3060), kernel 7.3.0-4-cachyos,
+bitland-mifs-wmi from v7.3, Secure Boot off.
+
+Thanks,
+<your name>

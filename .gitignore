@@ -1,0 +1,25 @@
+# 编译产物（bench 里现编现用，不入库）
+bench/flops
+bench/stream
+bench/stream_mt
+bench/keywatch
+*.o
+*.ko
+*.ko.zst
+*.mod
+*.mod.c
+*.cmd
+.tmp_versions/
+
+# Python
+__pycache__/
+*.pyc
+
+# 测试临时文件
+kde-bridge/pp_test
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*~
+.DS_Store

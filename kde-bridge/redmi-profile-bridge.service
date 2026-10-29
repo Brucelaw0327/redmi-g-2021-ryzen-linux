@@ -1,0 +1,16 @@
+[Unit]
+Description=Redmi platform-profile bridge (KDE power profiles -> EC modes)
+Documentation=https://github.com/torvalds/linux/blob/master/drivers/platform/x86/bitland-mifs-wmi.c
+After=dbus.service
+Before=power-profiles-daemon.service graphical.target
+Conflicts=power-profiles-daemon.service
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.UPower.PowerProfiles
+ExecStart=/usr/local/bin/redmi-profile-bridge
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

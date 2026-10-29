@@ -1,0 +1,287 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+"""redmi-profile-bridge —— 把 KDE 的「省电 / 平衡 / 性能」三档接到本机 EC 三档
+
+背景
+----
+KDE 的档位选择器（电池托盘 + 系统设置 → 节能）并不自己操作硬件，它只是
+D-Bus 上 org.freedesktop.UPower.PowerProfiles 的客户端，真正的实现是
+power-profiles-daemon（ppd）。而 ppd 的「平衡」写的是 platform_profile=balanced，
+本机驱动 bitland-mifs-wmi 的 profile_set() 明确返回 -EOPNOTSUPP，
+所以直接上 ppd 会导致「平衡」这一档点了没反应。
+
+本服务顶替 ppd 占住同一个总线名与对象路径，实现同一套属性，
+把 KDE 的三档映射到本机真实存在的三档：
+
+    power-saver  -> low-power            + powersave   / power
+    balanced     -> balanced-performance + powersave   / balance_performance
+    performance  -> performance          + performance / performance
+
+这样 KDE 托盘、系统设置、以及「循环切换电源配置文件」快捷键全部原生可用，
+语义也和固件一致。ppd 会被 mask 掉，避免抢总线名。
+
+用法（通常由 systemd 启动）
+--------------------------
+    DRY_RUN=1 PP_PATH=/tmp/pp ./redmi-profile-bridge     # 不写 sysfs，调试用
+"""
+
+import glob
+import os
+import signal
+import sys
+
+import gi
+
+gi.require_version("Gio", "2.0")
+gi.require_version("GLib", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+BUS_NAME = os.environ.get("BUS_NAME", "org.freedesktop.UPower.PowerProfiles")
+# 仅供本地联调：BUS_TYPE=session 时挂到会话总线，不碰系统总线，也不需要 root
+BUS_TYPE = Gio.BusType.SESSION if os.environ.get("BUS_TYPE") == "session" else Gio.BusType.SYSTEM
+
+OBJ_PATH = "/org/freedesktop/UPower/PowerProfiles"
+IFACE = "org.freedesktop.UPower.PowerProfiles"
+
+PP_PATH = os.environ.get("PP_PATH", "/sys/firmware/acpi/platform_profile")
+DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
+POLL_MS = int(os.environ.get("POLL_MS", "1000"))
+
+# KDE 档位名 -> (platform_profile, governor, epp)
+PROFILES = {
+    "power-saver": ("low-power", "powersave", "power"),
+    "balanced": ("balanced-performance", "powersave", "balance_performance"),
+    "performance": ("performance", "performance", "performance"),
+}
+ORDER = ["power-saver", "balanced", "performance"]
+REVERSE = {v[0]: k for k, v in PROFILES.items()}
+
+XML = """
+<node>
+  <interface name="org.freedesktop.UPower.PowerProfiles">
+    <method name="HoldProfile">
+      <arg type="s" direction="in" name="profile"/>
+      <arg type="s" direction="in" name="reason"/>
+      <arg type="s" direction="in" name="application_id"/>
+      <arg type="u" direction="out" name="cookie"/>
+    </method>
+    <method name="ReleaseProfile">
+      <arg type="u" direction="in" name="cookie"/>
+    </method>
+    <method name="SetActionEnabled">
+      <arg type="s" direction="in" name="action"/>
+      <arg type="b" direction="in" name="enabled"/>
+    </method>
+    <property name="ActiveProfile" type="s" access="readwrite"/>
+    <property name="PerformanceInhibited" type="s" access="read"/>
+    <property name="PerformanceDegraded" type="s" access="read"/>
+    <property name="Profiles" type="aa{sv}" access="read"/>
+    <property name="Actions" type="as" access="read"/>
+    <property name="ActionsInfo" type="aa{sv}" access="read"/>
+    <property name="ActiveProfileHolds" type="aa{sv}" access="read"/>
+    <property name="Version" type="s" access="read"/>
+    <property name="BatteryAware" type="b" access="readwrite"/>
+  </interface>
+</node>
+"""
+
+
+def log(msg):
+    print("redmi-profile-bridge: %s" % msg, file=sys.stderr, flush=True)
+
+
+def read_pp():
+    try:
+        with open(PP_PATH, "r", encoding="ascii") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _write(path, text):
+    if DRY_RUN:
+        return
+    with open(path, "w", encoding="ascii") as f:
+        f.write(text)
+
+
+def apply_profile(name):
+    """把 KDE 档位写入硬件，失败抛异常（D-Bus 会把它变成错误回复）。"""
+    if name not in PROFILES:
+        raise ValueError("未知档位 %s" % name)
+    pp, gov, epp = PROFILES[name]
+    _write(PP_PATH, pp)
+
+    # 顺序不能反：amd-pstate-epp 在 governor=performance 时会把 EPP 可用值锁成
+    # 只剩 performance，此时写 EPP 会静默失败。必须先放开 governor 再写 EPP。
+    for p in sorted(glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor")):
+        _write(p, gov)
+    for p in sorted(glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference")):
+        _write(p, epp)
+
+    if not DRY_RUN:
+        cur = read_pp()
+        if cur != pp:
+            raise RuntimeError("固件拒绝 %s（回读 %s）" % (pp, cur))
+
+
+state = {"active": REVERSE.get(read_pp(), "balanced"), "holds": {}, "cookie": 0}
+
+
+def holds_variants():
+    out = []
+    for cookie, h in sorted(state["holds"].items()):
+        out.append({
+            "Profile": GLib.Variant("s", h["profile"]),
+            "Reason": GLib.Variant("s", h["reason"]),
+            "ApplicationId": GLib.Variant("s", h["app_id"]),
+            "Cookie": GLib.Variant("u", cookie),
+        })
+    return out
+
+
+def strongest():
+    if not state["holds"]:
+        return None
+    return max(state["holds"].values(),
+               key=lambda h: ORDER.index(h["profile"]) if h["profile"] in ORDER else -1)["profile"]
+
+
+def emit_changed(conn, props):
+    payload = {}
+    if "ActiveProfile" in props:
+        payload["ActiveProfile"] = GLib.Variant("s", state["active"])
+    if "ActiveProfileHolds" in props:
+        payload["ActiveProfileHolds"] = GLib.Variant("aa{sv}", holds_variants())
+    conn.emit_signal(
+        None, OBJ_PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+        GLib.Variant("(sa{sv}as)", (IFACE, payload, [])),
+    )
+
+
+def on_get_property(conn, sender, path, iface, prop):
+    if prop == "ActiveProfile":
+        return GLib.Variant("s", state["active"])
+    if prop == "PerformanceInhibited" or prop == "PerformanceDegraded":
+        return GLib.Variant("s", "")
+    if prop == "Profiles":
+        return GLib.Variant("aa{sv}", [
+            {"Profile": GLib.Variant("s", n),
+             "Driver": GLib.Variant("s", "platform_profile")}
+            for n in ORDER
+        ])
+    if prop == "Actions":
+        return GLib.Variant("as", ["switch-profile", "hold-profile"])
+    if prop == "ActionsInfo":
+        return GLib.Variant("aa{sv}", [])
+    if prop == "ActiveProfileHolds":
+        return GLib.Variant("aa{sv}", holds_variants())
+    if prop == "Version":
+        return GLib.Variant("s", "0.21")
+    if prop == "BatteryAware":
+        return GLib.Variant("b", False)
+    raise KeyError(prop)
+
+
+def on_set_property(conn, sender, path, iface, prop, value):
+    if prop == "BatteryAware":
+        return True
+    if prop != "ActiveProfile":
+        return False
+    name = value.get_string()
+    try:
+        apply_profile(name)
+    except Exception as exc:  # noqa: BLE001
+        log("切换到 %s 失败：%s" % (name, exc))
+        return False
+    state["active"] = name
+    log("档位 -> %s（%s）" % (name, PROFILES[name][0]))
+    emit_changed(conn, {"ActiveProfile"})
+    return True
+
+
+def on_method_call(conn, sender, path, iface, method, params, invocation):
+    if method == "HoldProfile":
+        profile, reason, app_id = params.unpack()
+        if profile not in PROFILES:
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.InvalidArgs",
+                                         "unknown profile %s" % profile)
+            return
+        state["cookie"] += 1
+        cookie = state["cookie"]
+        state["holds"][cookie] = {"profile": profile, "reason": reason, "app_id": app_id}
+        best = strongest()
+        if best and best != state["active"]:
+            try:
+                apply_profile(best)
+                state["active"] = best
+            except Exception as exc:  # noqa: BLE001
+                log("hold 提升档位失败：%s" % exc)
+        log("HoldProfile(%s, %s, %s) -> cookie %d" % (profile, reason, app_id, cookie))
+        emit_changed(conn, {"ActiveProfile", "ActiveProfileHolds"})
+        invocation.return_value(GLib.Variant("(u)", (cookie,)))
+        return
+
+    if method == "ReleaseProfile":
+        (cookie,) = params.unpack()
+        state["holds"].pop(cookie, None)
+        log("ReleaseProfile(%d)" % cookie)
+        emit_changed(conn, {"ActiveProfileHolds"})
+        invocation.return_value(None)
+        return
+
+    if method == "SetActionEnabled":
+        invocation.return_value(None)
+        return
+
+    invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method)
+
+
+def poll(conn):
+    """外部改了档位（BIOS、Fn+K、perfmode.sh）时，把 KDE 界面同步过来。"""
+    cur = read_pp()
+    name = REVERSE.get(cur)
+    if name and name != state["active"]:
+        log("外部变更：%s -> %s" % (cur, name))
+        state["active"] = name
+        emit_changed(conn, {"ActiveProfile"})
+    return True
+
+
+def on_bus_acquired(conn, name):
+    node = Gio.DBusNodeInfo.new_for_xml(XML)
+    reg = conn.register_object(
+        OBJ_PATH, node.interfaces[0],
+        on_method_call, on_get_property, on_set_property,
+    )
+    if reg == 0:
+        log("注册对象失败")
+        sys.exit(1)
+    log("已接管 %s（当前档位 %s，platform_profile=%s）"
+        % (name, state["active"], read_pp() or "?"))
+    if POLL_MS > 0:
+        GLib.timeout_add(POLL_MS, poll, conn)
+
+
+def on_name_lost(conn, name):
+    log("无法获得总线名 %s——power-profiles-daemon 还在跑？"
+        "先执行 sudo systemctl mask --now power-profiles-daemon" % name)
+    sys.exit(1)
+
+
+def main():
+    loop = GLib.MainLoop()
+
+    def on_signal(_signum, _frame):
+        loop.quit()
+
+    signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGINT, on_signal)
+    Gio.bus_own_name(BUS_TYPE, BUS_NAME, Gio.BusNameOwnerFlags.NONE,
+                     on_bus_acquired, None, on_name_lost)
+    loop.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
