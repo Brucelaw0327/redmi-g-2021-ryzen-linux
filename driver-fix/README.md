@@ -11,7 +11,9 @@ if (output.data[0] != WMI_SYSTEM_AC_CIRCULARHOLE)
         return -EOPNOTSUPP;
 ```
 
-本机 EC 对 `WMI_SYSTEM_AC_STATE` 的查询返回 **0**（一个未定义的类型），于是所有档位写入都被拒。表现就是 `platform_profile` 写什么都不生效。
+本机 EC 对 `WMI_SYSTEM_AC_STATE` 的查询返回 **0**（一个未定义的类型）。
+
+注意这个检查的位置：它只在 `PERFORMANCE` 和 `BALANCED_PERFORMANCE` 两个分支里被调用，`LOW_POWER` 和 `BALANCED` 不走它。所以原厂状态下不是"所有档位都坏了"，而是**性能档必定失败、平衡档落到极速、只有省电档正常** —— 这种半坏状态比全坏更难察觉。
 
 修法：只在明确报告 Type-C 供电时拒绝，未定义值放行 —— 因为档位本来就是由 EC 自己管的，跟适配器类型没有必然关系。
 
@@ -22,11 +24,11 @@ if (output.data[0] == WMI_SYSTEM_AC_TYPEC) {
 }
 ```
 
-## Bug B：`balanced` 假成功
+## Bug B：`balanced` 落到极速
 
-ACPI 导出的 `platform_profile_choices` 含 `balanced`，但固件的均衡档实际叫 `balanced-performance`。写 `balanced` 驱动照收不误，固件默默忽略，回读还是旧值 —— 调用方以为成功了。
+ACPI 导出的 `platform_profile_choices` 含 `balanced`，但固件的均衡档实际叫 `balanced-performance`。写 `balanced` 驱动照收不误，固件也不报错 —— 但它落到的是**极速档**（`0x230` 变 0，`platform_profile` 回读变 `performance`）。调用方以为切到了均衡，实际拿到的是最耗电的那一档。
 
-修法：均衡档统一映射到 `balanced-performance`。
+修法：这个值序问题驱动层无法自行判断（驱动不知道固件的编码），所以修复放在桥接层 —— 均衡档统一映射到 `balanced-performance`。驱动补丁只管 Bug A。
 
 ## 安装
 

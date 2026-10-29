@@ -27,26 +27,39 @@
 
 BIOS 里写死的，不是四个也不是两个。反编译 BIOS Setup 变量确认（`Setup` GUID `a04a27f4-df00-4d42-b552-39511302113d`，**offset 0x230**）：
 
-| 固件档位 | 0x230 | 内核 platform_profile | governor | EPP | 频率上限 |
+| 固件档位 | 0x230 | 内核 platform_profile | governor | EPP | 满载稳态频率 |
 |---|---|---|---|---|---|
-| 静谧 Silence | 2 | `low-power` | powersave | power | 3201 MHz |
-| 均衡 Balance | 1 | `balanced-performance` | powersave | balance_performance | 4465 MHz |
-| 极速 Turbo | 0 | `performance` | performance | performance | 4465 MHz |
+| 静谧 Silence | 2 | `low-power` | powersave | power | ~3.2 GHz |
+| 均衡 Balance | 1 | `balanced-performance` | powersave | balance_performance | ~4.4 GHz |
+| 极速 Turbo | 0 | `performance` | performance | performance | ~4.4 GHz |
+
+「满载稳态频率」是长时间全核压测下的实际频率，不是 `scaling_max_freq`。三档的 `scaling_max_freq` 都是 4465 MHz，轻载时静谧档一样能上 4 GHz —— 区别在功耗墙和风扇曲线，不在频率上限。
 
 ### ⚠️ 三个必踩的坑
 
-**坑 1：值序不同，混用会切错档。**
+**坑 1：值序不同，名字不能当映射用。**
 
-```
-固件 Setup 0x230：  0=极速  1=均衡  2=静谧
-驱动 WMI 值    ：  0=均衡  1=极速  2=静谧
-```
+驱动枚举里的名字和它实际发出去的值对不上，实测四个 `platform_profile` 选项落点：
 
-两套序**不一样**。看到"写 0 变成极速"和"写 0 变成均衡"都对，取决于你读的是哪一层。判断真实状态必须读 efivarfs（`offset 4+0x230=564`，前 4 字节是属性头），不能只看 `platform_profile`。
+| 你写的 platform_profile | 驱动发的 WMI 值 | 固件 0x230 | 实际档位 |
+|---|---|---|---|
+| `low-power` | 2 | 2 | 静谧 |
+| `balanced` | 0 | 0 | **极速** |
+| `balanced-performance` | 1 | 1 | 均衡 |
+| `performance` | 3 | 0 | 极速 |
 
-**坑 2：`balanced` 是幽灵值。**
+注意 `balanced` 和 `performance` 两个完全不同的 WMI 值（0 和 3）都落到固件 0，也就是极速档。判断真实状态必须读 efivarfs（`offset 4+0x230=564`，前 4 字节是属性头），不能只看 `platform_profile`。
 
-ACPI 声明了 `low-power balanced balanced-performance performance` 四个可选值，但固件的均衡档根本不叫 `balanced`。写 `balanced` 驱动会接受、固件会忽略，回读仍是旧值 —— 属于**假成功**。均衡档必须写 `balanced-performance`。
+**坑 2：`balanced` 不是均衡，是极速。**
+
+ACPI 声明了 `low-power balanced balanced-performance performance` 四个可选值，但固件的均衡档必须写 `balanced-performance`。
+
+写 `balanced` 不会报错，看起来"成功"了，实际固件 `0x230` 变成 0（极速），`platform_profile` 回读变成 `performance`。所以：
+
+- 原厂状态下 KDE 点「平衡」→ 拿到的是**极速**，风扇全开、待机 70~80°C
+- 这台机器最初"空载就 70 多度"的根本原因就是这个
+
+**这是最阴的一个坑**：不报错、不回退、只是安静地给你一个更耗电的档位。
 
 **坑 3：直接写 sysfs 会绕过治理层。**
 
@@ -62,7 +75,17 @@ ACPI 声明了 `low-power balanced balanced-performance performance` 四个可�
 
 原厂 `bitland-mifs-wmi` 有两个 bug，都在这台机器上稳定复现：
 
-**Bug A — AC 供电类型误判。** 驱动认为只有特定 AC 类型才允许切档，而本机 EC 报告的是一个未定义值（0），于是所有档位写入都返回 `-EOPNOTSUPP`。
+**Bug A — AC 供电类型误判。** `profile_set()` 里只有 `PERFORMANCE` 和 `BALANCED_PERFORMANCE` 两个分支会先调 `bitland_check_performance_capability()`，而这个检查要求 EC 报告的 AC 类型等于 `2`（圆口）。本机 EC 返回的是未定义值 `0`，于是这两个分支必定返回 `-EOPNOTSUPP`；`LOW_POWER` 和 `BALANCED` 不走这个检查，所以能写进去。
+
+结果就是原厂状态下的实际能力：
+
+| KDE 档位 | 原厂行为 |
+|---|---|
+| 省电 | 正常，真的切到静谧 |
+| 平衡 | 写 `balanced` → 固件落到**极速**（坑 2） |
+| 性能 | 被驱动拒绝，什么都没发生 |
+
+也就是说**性能档从来没成功过**，而平衡档实际是极速档。
 
 ```diff
 - if (output.data[0] != WMI_SYSTEM_AC_CIRCULARHOLE)
@@ -74,7 +97,7 @@ ACPI 声明了 `low-power balanced balanced-performance performance` 四个可�
 
 改成只拒绝明确报告 Type-C 的情况，未定义值放行。
 
-**Bug B — `balanced` 假成功。** 见坑 2，`profile_set()` 接受了固件不认的值。补丁后均衡档统一走 `balanced-performance`。
+**Bug B — `balanced` 落错档。** 见坑 2，`profile_set()` 把 `BALANCED` 原样发给固件，固件把它当成极速处理。驱动本身没有能力纠正这一点（它不知道固件的值序），所以修法在桥接层：均衡档一律走 `balanced-performance`。
 
 ```bash
 cd driver-fix
@@ -91,7 +114,17 @@ cat /sys/firmware/acpi/platform_profile_choices
 
 ### 2. 装 KDE 三档桥接
 
-KDE 的档位选择器只是 `org.freedesktop.UPower.PowerProfiles` 的客户端，真正的实现在 `power-profiles-daemon`（ppd）。ppd 的"平衡"写的是 `balanced` —— 就是坑 2 那个幽灵值，所以点了没反应。
+KDE 的档位选择器只是 `org.freedesktop.UPower.PowerProfiles` 的客户端，真正的实现在 `power-profiles-daemon`（ppd 0.30）。ppd 把 KDE 三档直接映射到 `platform_profile` 的同名值：
+
+| KDE 档位 | ppd 写入 | 实际结果 |
+|---|---|---|
+| 省电 | `low-power` | 静谧 ✓ |
+| 平衡 | `balanced` | 极速 ✗（坑 2） |
+| 性能 | `performance` | 被驱动拒绝 ✗（Bug A） |
+
+三个档位只有一个能用，而且是"看起来正常"的那一个。
+
+这个桥接服务顶替 ppd 占住同一个总线名，把 KDE 三档映射到本机真实三档，并且**同时写三处**（platform_profile + governor + EPP）。ppd 在 amd-pstate 机器上只调 EPP，不碰 `scaling_governor` —— 这就是原厂状态下按 Fn+K 或切 KDE 档位时，governor 始终卡在 `performance` 的原因。
 
 这个桥接服务顶替 ppd 占住同一个总线名，把 KDE 三档映射到本机真实三档：
 

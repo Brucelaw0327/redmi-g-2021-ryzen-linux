@@ -11,9 +11,14 @@
 #   极速 turbo    -> performance          -> 0x230 = 0 = Turbo
 #
 # 两个坑，别踩：
-#   1. balanced 是幽灵值。ACPI 的 choices 里有它，驱动也照收，但固件不认识，
-#      写完回读还是旧值（假成功）。均衡档必须写 balanced-performance。
-#   2. 驱动的 WMI 值序和固件 Setup 值序不一样（驱动 0=均衡/1=极速/2=静谧）。
+#   1. balanced 不是均衡。ACPI 的 choices 里有它，驱动也照收，写进去不报错，
+#      但固件把它落到极速档（0x230 变 0，platform_profile 回读变 performance）。
+#      均衡档必须写 balanced-performance。
+#   2. 驱动枚举的名字不能当映射用。实测四个选项的落点：
+#        low-power(2) -> 0x230 2       balanced(0)             -> 0x230 0
+#        balanced-performance(1) -> 0x230 1
+#        performance(3) -> 0x230 0
+#      注意 balanced 和 performance 两个不同的值都落到 0（极速）。
 #      判断真实状态必须读 efivarfs，不能只看 platform_profile。
 #
 # 依赖：内核 bitland_mifs_wmi（提供 platform_profile）+ ACPI

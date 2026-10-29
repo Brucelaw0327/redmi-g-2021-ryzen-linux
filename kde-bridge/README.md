@@ -8,7 +8,9 @@ KDE 的档位选择器（电池托盘、系统设置 → 节能、"循环切换�
 
 而 ppd 有个硬编码的假设：档位就是 `power-saver` / `balanced` / `performance`，写进 `platform_profile` 的字面量也是 `balanced`。
 
-**这台机器固件的均衡档不叫 `balanced`。** 写 `balanced` 驱动接受、固件忽略，回读还是旧值 —— 典型的假成功。这就是 KDE 里点"平衡"毫无反应的根因。（即使打完驱动补丁也一样，因为补丁只改了 `performance` 类的路径判断，没有替 ppd 纠正这个字面量。）
+**这台机器固件的均衡档不叫 `balanced`。** 写 `balanced` 不报错，但固件会把它落到**极速档**（`0x230` 变 0），`platform_profile` 回读变成 `performance`。所以 KDE 里点"平衡"，实际拿到的是最耗电的那一档，风扇全开、待机 70~80°C。（即使打完驱动补丁也一样，因为补丁只改了 AC 类型判断，没有替 ppd 纠正这个字面量。）
+
+再加上驱动 Bug A 让 `performance` 直接返回 `-EOPNOTSUPP`，原厂状态下 KDE 三个档位里只有"省电"是真的。
 
 所以需要一个服务顶替 ppd，占住同一个总线名和对象路径，实现同一套属性，把名字换成机器真正认的：
 
