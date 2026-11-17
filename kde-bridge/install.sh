@@ -65,7 +65,7 @@ busctl get-property org.freedesktop.UPower.PowerProfiles \
     org.freedesktop.UPower.PowerProfiles Profiles 2>&1 || true
 echo
 echo "--- 当前硬件状态 ---"
-../perfmode.sh show 2>/dev/null || cat /sys/firmware/acpi/platform_profile
+../tools/perfmode.sh show 2>/dev/null || cat /sys/firmware/acpi/platform_profile
 echo
 echo "完成。KDE 的电池托盘 / 系统设置 → 节能，现在三档都可用。"
 echo "切档后可看：journalctl -u redmi-profile-bridge -f"
