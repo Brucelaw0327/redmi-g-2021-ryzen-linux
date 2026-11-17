@@ -180,6 +180,7 @@ sudo ./tools/perfmode.sh kbd 2      # 键盘背光 0-3
 | 静谧档最高 3201 MHz | 固件把频率封顶到 4465 的 71.7% | 重载前切回均衡以上 |
 | 充电阈值不支持 | 固件没这能力，KDE 会报错 | 忽略即可，与档位无关 |
 | 独显直连时待机 25W | 外接屏由 dGPU 驱动，属正常开销 | 不接外屏可省 |
+| 没启用 nvidia-powerd 时独显锁 95W | Dynamic Boost 守护进程默认未启用，GPU 停在静态基础功耗墙；`nvidia-smi -pl` 会被拒（不是驱动开源/闭源的问题）| `sudo systemctl enable --now nvidia-powerd`。启用后 GPU 上限随三档联动：静谧 95W / 均衡 100W / 极速 130W（实测，`Max Power Limit` 恒为 130W）|
 
 ---
 
