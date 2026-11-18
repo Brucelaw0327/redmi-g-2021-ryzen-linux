@@ -125,8 +125,40 @@ CODECS=h264,vp9 ./hwdec_test.sh ...                   # 只测指定编码
 
 ---
 
+## KDE 快捷方式的坑：新窗口未必带你的 flag
+
+Chrome 的启动参数来自启动那一行命令。如果只把 flag 写在 `.desktop` 的主 `Exec=` 里，右键菜单里的「新建窗口」「新建无痕窗口」可能不带它——这两个 Action 在 `.desktop` 文件里是**独立的 Exec 行**（本机位于 `~/.local/share/applications/google-chrome-unstable.desktop`，用户级文件覆盖 `/usr/share` 的同名版本）。
+
+实测三种情况（临时 profile，1920×1080 H.264）：
+
+| 场景 | 解码器 | 结果 |
+|---|---|---|
+| 已有带 flag 主实例时，从无 flag 命令开新窗口 | `VaapiVideoDecoder` | 硬解 |
+| 已有带 flag 主实例时，从无 flag 命令开无痕窗口 | `VaapiVideoDecoder` | 硬解 |
+| 冷启动（无任何实例）时用无 flag 命令 | `FFmpegVideoDecoder` | **软解** |
+
+原因是 Chrome 按 user-data-dir 单实例运行：主实例在跑时，无 flag 的启动命令只是把请求转发给现有进程（终端打印"正在现有的浏览器会话中打开"，退出码 0），由**已带 flag 的进程**开新窗口，继承其进程级配置；而冷启动时没有主实例可接管，裸 `Exec=` 就会创建一个无 flag 的进程，此后所有窗口都跟着软解。
+
+**结论：三个 Action 的 `Exec=` 都要带 flag，不能只改主启动行。** 本机最终配置：
+
+```ini
+[Desktop Entry]
+Exec=/usr/bin/google-chrome-unstable --enable-features=VaapiOnNvidiaGPUs %U
+
+[Desktop Action new-private-window]
+Exec=/usr/bin/google-chrome-unstable --incognito --enable-features=VaapiOnNvidiaGPUs
+
+[Desktop Action new-window]
+Exec=/usr/bin/google-chrome-unstable --enable-features=VaapiOnNvidiaGPUs
+```
+
+改完执行 `update-desktop-database ~/.local/share/applications` 刷新。
+
+---
+
 ## 常见坑
 
+- **`.desktop` 只改主 Exec 不够**：右键的新建窗口/无痕窗口是独立 Exec 行，冷启动时会暴露出没带 flag 的进程（详见上节）。
 - **`chrome://gpu` 的状态摘要不可信**，只看 Decoding 列表或实测解码器。
 - **低于 720p 不加速**：Chromium 86+ 桌面端的行为，测硬解必须用 ≥720p 的视频。
 - **YouTube 优先 VP9/AV1**：本机已验证都硬解，不需要再装 `h264ify` 之类的扩展强制切 H.264。
