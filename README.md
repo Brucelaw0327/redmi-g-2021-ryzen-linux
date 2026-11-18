@@ -189,9 +189,9 @@ sudo ./tools/perfmode.sh kbd 2      # 键盘背光 0-3
 ```
 driver-fix/          驱动 bug 修复（DKMS 包 + 补丁 + 上游原件对照）
 kde-bridge/          KDE 三档桥接（顶替 ppd 的 D-Bus 服务）
-tools/               档位切换、逐档探测、往返验证、Fn+K 抓键
+tools/               档位切换、逐档探测、往返验证、Fn+K 抓键、Chrome 硬解实测
 bench/               体检基准源码（FLOPS / STREAM / 键盘事件）+ 原始数据
-docs/                体检报告 HTML、内核 bug 报告全文
+docs/                体检报告 HTML、内核 bug 报告全文、Chrome 硬解笔记
 ```
 
 `bench/` 里的是当时测这台机器用的，不装也能单独编译来测别的机器：
@@ -215,6 +215,18 @@ cd driver-fix && sudo ./uninstall.sh      # 再卸驱动，恢复上游原版
 ```
 
 两个脚本都会把改动还原干净（ppd 取消 mask、D-Bus 入口还原、DKMS 移除）。
+
+---
+
+## Chrome 视频硬解
+
+本机 RTX 3060 的 NVDEC 解码能力在 Chrome 里默认没用上。实测确认：只要一行 `--enable-features=VaapiOnNvidiaGPUs`，H.264 / VP9 / HEVC / AV1 / VP8 就全部切到 `VaapiVideoDecoder` 硬解，不需要环境变量或其他一堆 flag。
+
+完整结论、排查过程（为什么 `chrome://gpu` 会骗人、其他启用方式都不生效）和最小配置见 [`docs/chrome-nvidia-vaapi-硬解笔记.md`](docs/chrome-nvidia-vaapi-硬解笔记.md)。验证脚本在 `tools/hwdec_test.sh`：
+
+```bash
+cd tools && ./hwdec_test.sh --enable-features=VaapiOnNvidiaGPUs
+```
 
 ---
 
