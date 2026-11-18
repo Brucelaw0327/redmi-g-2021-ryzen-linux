@@ -222,7 +222,7 @@ cd driver-fix && sudo ./uninstall.sh      # 再卸驱动，恢复上游原版
 
 本机 RTX 3060 的 NVDEC 解码能力在 Chrome 里默认没用上。实测确认：只要一行 `--enable-features=VaapiOnNvidiaGPUs`，H.264 / VP9 / HEVC / AV1 / VP8 就全部切到 `VaapiVideoDecoder` 硬解，不需要环境变量或其他一堆 flag。
 
-完整结论、排查过程（为什么 `chrome://gpu` 会骗人、其他启用方式都不生效、KDE 快捷方式的三个 Exec 行都要带 flag 否则冷启动是软解）和最小配置见 [`docs/chrome-nvidia-vaapi-硬解笔记.md`](docs/chrome-nvidia-vaapi-硬解笔记.md)。验证脚本在 `tools/hwdec_test.sh`：
+完整结论、排查过程（为什么 `chrome://gpu` 会骗人、其他启用方式都不生效、KDE 快捷方式的三个 Exec 行都要带 flag 否则冷启动是软解、终端入口要配 `chrome-dev-flags.conf`）和最小配置见 [`docs/chrome-nvidia-vaapi-硬解笔记.md`](docs/chrome-nvidia-vaapi-硬解笔记.md)。验证脚本在 `tools/hwdec_test.sh`：
 
 ```bash
 cd tools && ./hwdec_test.sh --enable-features=VaapiOnNvidiaGPUs

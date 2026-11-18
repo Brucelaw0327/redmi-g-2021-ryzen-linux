@@ -154,6 +154,24 @@ Exec=/usr/bin/google-chrome-unstable --enable-features=VaapiOnNvidiaGPUs
 
 改完执行 `update-desktop-database ~/.local/share/applications` 刷新。
 
+### 终端入口是另一条独立的路
+
+`.desktop` 只管图形入口。终端里直接敲 `google-chrome-unstable` 走的是另一套：`/usr/bin/google-chrome-unstable` 是个 launcher 脚本，它读取 `~/.config/chrome-dev-flags.conf`（由 `XDG_CONFIG_HOME` 决定位置，默认 `~/.config`），把文件内容作为命令行参数注入。这个文件默认不存在，所以裸跑终端命令就是无 flag → 软解。
+
+要让终端入口也硬解，创建该文件：
+
+```bash
+# ~/.config/chrome-dev-flags.conf
+--enable-features=VaapiOnNvidiaGPUs
+```
+
+经本机确认的启动入口共两类：
+
+- **图形入口**：KDE 菜单/任务栏（用户级 `.desktop`）、点链接走默认浏览器关联（`xdg-open`/文件管理器/KRunner，最终也落到那个 `.desktop` 的主 Exec）——三行 Exec 全带 flag 后都硬解。
+- **终端入口**：`google-chrome-unstable` → launcher → `chrome-dev-flags.conf`；直接调 `/opt/google/chrome-unstable/chrome` 真实二进制则绕过 launcher，什么 flag 都没有，属于软解，别这么用。
+
+系统级 `/usr/share/applications/` 下有两个同名 `.desktop`，Exec 都不带 flag，但被 `~/.local/share/applications/` 的用户级版本覆盖，正常点菜单不会用到。本机没有 autostart 项、没有 systemd user 服务、没有 shell alias，所以实际入口就上面两类。
+
 ---
 
 ## 常见坑
